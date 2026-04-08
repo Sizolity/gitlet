@@ -3,23 +3,21 @@ package utils
 import (
 	"crypto/sha1"
 	"fmt"
-	"time"
+	"path/filepath"
 )
-
-
 
 func GetArgsNum(args []string) int {
 	return len(args)
 }
 
-/* generate a SHA-1 code */
-func GenerateID() string {
-	timestamp := time.Now().String()
-
+/* Content-addressable SHA-1 hash. */
+func GenerateID(data []byte) string {
 	hasher := sha1.New()
-	hasher.Write([]byte(timestamp))
-	hash := hasher.Sum(nil)
-	return fmt.Sprintf("%x", hash)
+	hasher.Write(data)
+	return fmt.Sprintf("%x", hasher.Sum(nil))
 }
 
-
+// NormalizePath cleans a file path so that "./foo.txt" and "foo.txt" resolve identically.
+func NormalizePath(path string) string {
+	return filepath.Clean(path)
+}

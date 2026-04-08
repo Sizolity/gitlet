@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 )
 
-
 type Blob struct {
 	Filename string `json:"filename"`
 	FilePath string `json:"filepath"`
@@ -16,13 +15,12 @@ type Blob struct {
 	HashId   string `json:"hashId"`
 }
 
-
 func NewBlob(filePath string, contents []byte) *Blob {
 	return &Blob{
 		Filename: filepath.Base(filePath),
 		FilePath: filePath,
 		Contents: contents,
-		HashId: utils.GenerateID(),
+		HashId:   utils.GenerateID(contents),
 	}
 }
 
@@ -31,46 +29,19 @@ func (b *Blob) Persist() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	utils.WriteFileBytes(config.ADDSTAGE + "/" + b.HashId, data)
+	utils.WriteFileBytes(config.BLOB+"/"+b.HashId, data)
 }
 
-
-func GetStageBlob(w utils.Where) []*Blob {
-	// TODO: Need refactor.
-	dirname := utils.GetWhere(w)
-	files := utils.ReadDir(dirname)
-	blobs := make([]*Blob, 0, 10)
-	for _, file := range files {
-		filepath := dirname + "/" + file.Name()
-		data := utils.ReadFile(filepath)
-		b := &Blob{}
-		err := json.Unmarshal(data, b)
-		if err != nil {
-			log.Fatal(err)
-		}
-		blobs = append(blobs, b)
+func GetBlobById(id string) *Blob {
+	path := config.BLOB + "/" + id
+	if !utils.FileExists(path) {
+		return nil
 	}
-	return blobs
-}
-
-func GetBlobByFilename(filename string, w utils.Where) *Blob {
-	blobs := GetStageBlob(w)
-	for _, blob := range blobs {
-		if blob.FilePath == filename {
-			return blob
-		}
+	data := utils.ReadFile(path)
+	b := &Blob{}
+	err := json.Unmarshal(data, b)
+	if err != nil {
+		log.Fatal(err)
 	}
-	// can't find blob named "filename".
-	return nil
-}
-
-func GetBlobById(id string, w utils.Where) *Blob {
-	blobs := GetStageBlob(w)
-	for _, blob := range blobs {
-		if blob.HashId == id {
-			return blob
-		}
-	}
-	// can't find blob.
-	return nil
+	return b
 }

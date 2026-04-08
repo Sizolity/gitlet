@@ -1,166 +1,128 @@
 package instruction
 
 import (
-	"bytes"
 	"fmt"
 	"gitlet/config"
 	"gitlet/gitlet"
 	"gitlet/utils"
-	"log"
 	"os"
+	"sort"
 	"strings"
 )
 
 func Init_gitlet() {
 	_, err := os.Stat(".gitlet")
 	if os.IsNotExist(err) {
-		// .getlet directory not exit
 		os.Mkdir(".gitlet", 0755)
-		os.MkdirAll(config.ADDSTAGE, 0755)
-		os.MkdirAll(config.RMSTAGE, 0755)
 		os.MkdirAll(config.COMMIT, 0755)
 		os.MkdirAll(config.BLOB, 0755)
 		os.MkdirAll(config.BRANCHES, 0755)
 		os.MkdirAll(config.REMOTES, 0755)
 		os.Create(config.HEAD)
 		os.Create(config.BRANCHES + "/master")
-		// write commitId into "refs/heads/master"
+
 		commit := gitlet.NewInitCommit()
-		utils.WriteFile(config.BRANCHES + "/master", commit.HashId)
-		// write "refs/heads/master" into HEAD
-		utils.WriteFile(config.HEAD, config.BRANCHES + "/master")
-		// write commitADD
+		utils.WriteFile(config.BRANCHES+"/master", commit.HashId)
+		utils.WriteFile(config.HEAD, config.BRANCHES+"/master")
 		commit.Persist()
+
+		idx := gitlet.NewIndex()
+		idx.Save()
+
 		fmt.Println("Gitlet init success.")
 	} else {
-		// .gitlet directory exist
 		fmt.Println("A Gitlet version-control system already exists in the current directory.")
 	}
 }
 
 func Add(filename string) {
+	filename = utils.NormalizePath(filename)
+
+	if !utils.FileExists(filename) {
+		fmt.Println("add: File does not exist.")
+		return
+	}
+
+	patterns := gitlet.LoadIgnorePatterns()
+	if gitlet.IsIgnored(filename, patterns) {
+		fmt.Println("add: File is ignored by .gitletignore.")
+		return
+	}
+
 	data := utils.ReadFile(filename)
 	blob := gitlet.NewBlob(filename, data)
-	addBlobs := gitlet.GetStageBlob(utils.ADDSTAGE)
-	for _, b := range addBlobs {
-		if b.FilePath == blob.FilePath {
-			if bytes.Equal(b.Contents, blob.Contents) {
-				// same file
-				fmt.Println("add: file is already added.")
-				return
-			} else {
-				// changed file
-				utils.RemoveFile(utils.ADDSTAGE, b.HashId)
-				break
-			}
-		}
+
+	idx := gitlet.LoadIndex()
+	headCommit := gitlet.GetCommitById(gitlet.GetHEAD())
+
+	if headBlobId, ok := headCommit.BlobIds[filename]; ok && headBlobId == blob.HashId {
+		idx.Update(filename, headBlobId)
+		idx.Save()
+		return
 	}
-	// store the blob
+
 	blob.Persist()
-	
+	idx.Update(filename, blob.HashId)
+	idx.Save()
+
 	fmt.Println("Adding files succeed.")
 }
 
 func Commit(messages ...string) {
 	message := strings.Join(messages, " ")
-	// if some files exist in stage
-	if !utils.DirHasFiles(config.ADDSTAGE) && !utils.DirHasFiles(config.RMSTAGE) {
+
+	idx := gitlet.LoadIndex()
+	headCommit := gitlet.GetCommitById(gitlet.GetHEAD())
+
+	if mapsEqual(idx.Entries, headCommit.BlobIds) {
 		fmt.Println("Commit: Nothing to do.")
 		return
 	}
+
 	commit := gitlet.NewCommit(message)
-	// 1. copy Hashmap from HEAD
-	commitId := gitlet.GetHEAD()
-	oldCommit := gitlet.GetCommitById(commitId)
-	// Deep and shallow copies may not matter here, 
-	// because persistence will read information from the local file,
-	// and what is read out is still what was originally stored in the file.
-	blobIds := oldCommit.BlobIds
-
-	// 2. add blob into Hashmap from "addStage"
-	addBlobs := gitlet.GetStageBlob(utils.ADDSTAGE)
-	for _, addBlob := range addBlobs {
-		if blobID, ok := blobIds[addBlob.FilePath]; !ok {
-			blobIds[addBlob.FilePath] = addBlob.HashId
-		} else {
-			// file exist in commit, compare the content,
-			// if content is same, remove it from "addStage"
-			// if content is not same, rewrite Hashmap.
-			objBlob := gitlet.GetBlobById(blobID, utils.BLOB)
-			if objBlob != nil {
-				if bytes.Equal(addBlob.Contents, objBlob.Contents) {
-					// content same
-					utils.RemoveFile(utils.ADDSTAGE, addBlob.HashId)
-				} else {
-					// content not same
-					blobIds[addBlob.FilePath] = addBlob.HashId
-				}
-			} else {
-				log.Fatalln("you should't arrive here, some thing get wrong.")
-			}
-		}
+	blobIds := make(map[string]string)
+	for k, v := range idx.Entries {
+		blobIds[k] = v
 	}
-
-	// 3. move "addStage" to "objects/blobs"
-	// store blobs which contains in the commit blobs into "objects/blobs"
-	utils.MoveFiles(utils.ADDSTAGE, utils.BLOB)
-
-	// 4. remove "addStage" file
-	utils.RemoveFiles(utils.ADDSTAGE)
-	
-	// 5. remove "rmStage" from Hashmap
-	rmBlobs := gitlet.GetStageBlob(utils.RMSTAGE) 
-	for _, rmblob := range rmBlobs {
-		delete(blobIds, rmblob.FilePath)
-	}
-
-	// 6. remove "rmStage" file
-	utils.RemoveFiles(utils.RMSTAGE)
-
-	// 7. store this commit and move HEAD
-	// store this commit
 	commit.BlobIds = blobIds
 	commit.Persist()
-	// move HEAD
 	gitlet.MoveBranchPoint(commit.HashId)
+
 	fmt.Println("Commit succeed.")
 }
 
 func Rm(filename string) {
-	// 1. if file exist in "addStage" directory, remove it directly.
-	blob := gitlet.GetBlobByFilename(filename, utils.ADDSTAGE)
-	if blob != nil {
-		err := os.Remove(config.ADDSTAGE + "/" + blob.HashId)
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Println("rm file from addStage.")
+	filename = utils.NormalizePath(filename)
+
+	idx := gitlet.LoadIndex()
+	headCommit := gitlet.GetCommitById(gitlet.GetHEAD())
+
+	headBlobId, trackedByHead := headCommit.BlobIds[filename]
+	indexBlobId := idx.GetBlobId(filename)
+	inIndex := idx.Has(filename)
+
+	stagedForAdd := inIndex && (!trackedByHead || indexBlobId != headBlobId)
+
+	if !stagedForAdd && !trackedByHead {
+		fmt.Println("rm: No reason to remove the file.")
 		return
 	}
-	
-	fileExist := utils.FileExists(filename)
-	commitId := gitlet.GetHEAD()
-	commit := gitlet.GetCommitById(commitId)
-	if blobId, ok := commit.BlobIds[filename]; ok {
-		if fileExist {
-			// 2. if file exits in worktree and is traced by commit, 
-			//    move it in "rmStage" and remove it in worktree.
-			utils.MoveFile(utils.BLOB, utils.RMSTAGE, blobId)
-			err := os.Remove(filename)
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Println("rm file from commit and worktree.")
-			return
-		} else {
-			// 3. if file doesn't exit in worktree but is traced by commit, 
-			//    move it from "objects/blobs" to "rmStage".
-			utils.MoveFile(utils.BLOB, utils.RMSTAGE, blobId)
-			fmt.Println("rm file from commit.")
-			return
-		}
+
+	if stagedForAdd && !trackedByHead {
+		// Staged a new file not in HEAD — just unstage
+		idx.Remove(filename)
+		idx.Save()
+		fmt.Println("rm: Unstaged file.")
+		return
 	}
-	fmt.Println("rm: Nothing to do.")
+
+	// Tracked by HEAD — stage for removal
+	idx.Remove(filename)
+	idx.Save()
+	if utils.FileExists(filename) {
+		os.Remove(filename)
+	}
+	fmt.Println("rm: File removed.")
 }
 
 func Log() {
@@ -201,48 +163,106 @@ func Status() {
 	fmt.Printf("*%s\n", HEADBranch)
 	for _, branch := range branches {
 		if name := branch.Name(); name != HEADBranch {
-			fmt.Printf("*%s\n", name)
+			fmt.Printf(" %s\n", name)
 		}
 	}
 
-	fmt.Printf("=== Staged Files ===\n")
-	stages := gitlet.GetStageBlob(utils.ADDSTAGE)
-	for _, stage := range stages {
-		fmt.Println(stage.Filename)
+	idx := gitlet.LoadIndex()
+	headCommit := gitlet.GetCommitById(gitlet.GetHEAD())
+
+	// Staged files: in index with different blob than HEAD, or not in HEAD at all
+	var staged []string
+	for path, blobId := range idx.Entries {
+		if headBlobId, ok := headCommit.BlobIds[path]; !ok || headBlobId != blobId {
+			staged = append(staged, path)
+		}
+	}
+	sort.Strings(staged)
+	fmt.Printf("\n=== Staged Files ===\n")
+	for _, f := range staged {
+		fmt.Println(f)
 	}
 
-	fmt.Printf("=== Removed Files ===\n")
-	stages = gitlet.GetStageBlob(utils.RMSTAGE)
-	for _, stage := range stages {
-		fmt.Println(stage.Filename)
+	// Removed files: in HEAD but not in index
+	var removed []string
+	for path := range headCommit.BlobIds {
+		if !idx.Has(path) {
+			removed = append(removed, path)
+		}
+	}
+	sort.Strings(removed)
+	fmt.Printf("\n=== Removed Files ===\n")
+	for _, f := range removed {
+		fmt.Println(f)
 	}
 
-	// fmt.Printf("=== Modifications Not Staged For Commit ===\n")
-	// TODO
+	// Modifications not staged for commit
+	var modified []string
+	for path, blobId := range idx.Entries {
+		if utils.FileExists(path) {
+			content := utils.ReadFile(path)
+			if utils.GenerateID(content) != blobId {
+				modified = append(modified, path+" (modified)")
+			}
+		} else {
+			modified = append(modified, path+" (deleted)")
+		}
+	}
+	sort.Strings(modified)
+	fmt.Printf("\n=== Modifications Not Staged For Commit ===\n")
+	for _, f := range modified {
+		fmt.Println(f)
+	}
 
-	// fmt.Printf("=== Untracked Files ===\n")
-	// TODO
+	// Untracked files
+	var untracked []string
+	workFiles := getWorkTreeFiles()
+	for _, f := range workFiles {
+		if !idx.Has(f) {
+			untracked = append(untracked, f)
+		}
+	}
+	sort.Strings(untracked)
+	fmt.Printf("\n=== Untracked Files ===\n")
+	for _, f := range untracked {
+		fmt.Println(f)
+	}
 }
 
+func getWorkTreeFiles() []string {
+	var files []string
+	patterns := gitlet.LoadIgnorePatterns()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		return files
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Name() == ".gitlet" {
+			continue
+		}
+		if gitlet.IsIgnored(entry.Name(), patterns) {
+			continue
+		}
+		files = append(files, entry.Name())
+	}
+	return files
+}
 
 func Checkout(args ...string) {
 	NumArgs := len(args)
-	if NumArgs == 2 {// TODO
-		// 1. get removed file back from last commit
+	if NumArgs == 2 {
 		if args[0] == "-" {
 			checkoutFile(gitlet.GetHEAD(), args[1])
 		} else {
 			fmt.Println("checkout: Wrong argument.")
 		}
 	} else if NumArgs == 3 {
-		// 2. same as 1, get file back from commitID commit
 		if args[1] == "-" {
 			checkoutFile(args[0], args[2])
 		} else {
 			fmt.Println("checkout: Wrong argument.")
 		}
 	} else if NumArgs == 1 {
-		// 3. switch branch
 		switchBranch(args[0])
 	} else {
 		fmt.Println("checkout: Get wrong argument num.")
@@ -250,9 +270,14 @@ func Checkout(args ...string) {
 }
 
 func checkoutFile(commitId string, filename string) {
+	filename = utils.NormalizePath(filename)
 	commit := gitlet.GetCommitById(commitId)
 	if blobId, ok := commit.BlobIds[filename]; ok {
-		blob := gitlet.GetBlobById(blobId, utils.BLOB)
+		blob := gitlet.GetBlobById(blobId)
+		if blob == nil {
+			fmt.Println("checkout: Blob data missing.")
+			return
+		}
 		utils.WriteFileBytes(blob.FilePath, blob.Contents)
 		fmt.Println("checkout: Get file in Worktree.")
 	} else {
@@ -261,38 +286,45 @@ func checkoutFile(commitId string, filename string) {
 }
 
 func switchBranch(branchName string) {
-	oldBranch := gitlet.GetHEADBranch()
-	newBranch := branchName
-	if !gitlet.BranchExist(oldBranch) {
+	if !gitlet.BranchExist(branchName) {
 		fmt.Println("checkout: Branch not exist.")
 		return
 	}
-	
-	// remove files of old branch
+
+	// Remove working tree files of the current commit
 	commitId := gitlet.GetHEAD()
 	commit := gitlet.GetCommitById(commitId)
 	for _, blobId := range commit.BlobIds {
-		blob := gitlet.GetBlobById(blobId, utils.BLOB)
-		utils.RemoveFileByPath(blob.FilePath)
+		blob := gitlet.GetBlobById(blobId)
+		if blob != nil {
+			utils.RemoveFileByPath(blob.FilePath)
+		}
 	}
-	
-	// add file into worktree
-	gitlet.MoveHEAD(newBranch)
+
+	// Switch HEAD and restore working tree
+	gitlet.MoveHEAD(branchName)
 	commitId = gitlet.GetHEAD()
 	commit = gitlet.GetCommitById(commitId)
 	for _, blobId := range commit.BlobIds {
-		blob := gitlet.GetBlobById(blobId, utils.BLOB)
-		utils.WriteFileBytes(blob.FilePath, blob.Contents)
+		blob := gitlet.GetBlobById(blobId)
+		if blob != nil {
+			utils.WriteFileBytes(blob.FilePath, blob.Contents)
+		}
 	}
 
-	fmt.Printf("checkout: switch to %s.\n", newBranch)
+	// Sync index with the new commit
+	idx := gitlet.NewIndex()
+	for k, v := range commit.BlobIds {
+		idx.Entries[k] = v
+	}
+	idx.Save()
+
+	fmt.Printf("checkout: switch to %s.\n", branchName)
 }
 
 func Branch(newBranchName string) {
-	// this instruction don't change branch, just create a new branch,
-	// change operation is decided by 'checkout' instruction.
 	commitId := gitlet.GetHEAD()
-	utils.WriteFile(config.BRANCHES + "/" + newBranchName, commitId)
+	utils.WriteFile(config.BRANCHES+"/"+newBranchName, commitId)
 	fmt.Printf("branch: Create Branch(%s).\n", newBranchName)
 }
 
@@ -303,76 +335,352 @@ func RmBranch(targetBranchName string) {
 	} else if !gitlet.BranchExist(targetBranchName) {
 		fmt.Println("rm-branch: Target branch not exist.")
 	} else {
-		// branch exist
 		utils.RemoveFileByPath(config.BRANCHES + "/" + targetBranchName)
 		fmt.Println("rm-branch: Remove success.")
 	}
 }
 
 func Reset(cId string) {
-	// remove files of old branch
+	// Remove working tree files of the current commit
 	commitId := gitlet.GetHEAD()
 	commit := gitlet.GetCommitById(commitId)
 	for _, blobId := range commit.BlobIds {
-		blob := gitlet.GetBlobById(blobId, utils.BLOB)
-		utils.RemoveFileByPath(blob.FilePath)
+		blob := gitlet.GetBlobById(blobId)
+		if blob != nil {
+			utils.RemoveFileByPath(blob.FilePath)
+		}
 	}
 
-	// add file into worktree
+	// Move branch pointer and restore working tree
 	gitlet.MoveBranchPoint(cId)
 	commitId = gitlet.GetHEAD()
 	commit = gitlet.GetCommitById(commitId)
 	for _, blobId := range commit.BlobIds {
-		blob := gitlet.GetBlobById(blobId, utils.BLOB)
-		utils.WriteFileBytes(blob.FilePath, blob.Contents)
+		blob := gitlet.GetBlobById(blobId)
+		if blob != nil {
+			utils.WriteFileBytes(blob.FilePath, blob.Contents)
+		}
 	}
+
+	// Sync index with the new commit
+	idx := gitlet.NewIndex()
+	for k, v := range commit.BlobIds {
+		idx.Entries[k] = v
+	}
+	idx.Save()
 
 	fmt.Printf("reset: HEAD at %s.\n", cId[:7])
 }
 
-
 func Merge(targetBranchName string) {
-	getSplitPoint(gitlet.GetHEADBranch(), targetBranchName)
-	// TODO: 未完成弃坑
-}
+	currentBranch := gitlet.GetHEADBranch()
 
-func getSplitPoint(branch1, branch2 string) string {
-	// BFS find split point
-	branch1 = config.BRANCHES + "/" + branch1
-	branch2 = config.BRANCHES + "/" + branch2
-	commitId1 := string(utils.ReadFile(branch1))
-	commitId2 := string(utils.ReadFile(branch2))
-	map1 := make(map[string]int, 0)
-	map2 := make(map[string]int, 0)
-	getMapHelper(map1, 1, commitId1)
-	getMapHelper(map2, 1, commitId2)
-	
-	miniValue := 0
-	miniKey := ""
-	for key, value := range map1 {
-		if map2Value, ok := map2[key]; ok {
-			// also exist in map2
-			if miniKey == "" && miniValue == 0 {
-				miniKey = key
-				miniValue = map2Value
+	if !gitlet.BranchExist(targetBranchName) {
+		fmt.Println("merge: Target branch does not exist.")
+		return
+	}
+	if currentBranch == targetBranchName {
+		fmt.Println("merge: Cannot merge a branch with itself.")
+		return
+	}
+
+	idx := gitlet.LoadIndex()
+	headCommit := gitlet.GetCommitById(gitlet.GetHEAD())
+	if !mapsEqual(idx.Entries, headCommit.BlobIds) {
+		fmt.Println("merge: You have uncommitted changes.")
+		return
+	}
+
+	splitPointId := getSplitPoint(currentBranch, targetBranchName)
+	targetCommitId := string(utils.ReadFile(config.BRANCHES + "/" + targetBranchName))
+	currentCommitId := gitlet.GetHEAD()
+
+	if splitPointId == targetCommitId {
+		fmt.Println("merge: Already up-to-date.")
+		return
+	}
+
+	// Fast-forward: split point equals current HEAD
+	if splitPointId == currentCommitId {
+		for _, blobId := range headCommit.BlobIds {
+			blob := gitlet.GetBlobById(blobId)
+			if blob != nil && utils.FileExists(blob.FilePath) {
+				utils.RemoveFileByPath(blob.FilePath)
 			}
-			if miniValue > map2Value {
-				miniValue = value
-				miniKey = key
+		}
+		gitlet.MoveBranchPoint(targetCommitId)
+		targetCommit := gitlet.GetCommitById(targetCommitId)
+		for _, blobId := range targetCommit.BlobIds {
+			blob := gitlet.GetBlobById(blobId)
+			if blob != nil {
+				utils.WriteFileBytes(blob.FilePath, blob.Contents)
 			}
+		}
+		newIdx := gitlet.NewIndex()
+		for k, v := range targetCommit.BlobIds {
+			newIdx.Entries[k] = v
+		}
+		newIdx.Save()
+		fmt.Println("merge: Fast-forward.")
+		return
+	}
+
+	// Three-way merge
+	splitCommit := gitlet.GetCommitById(splitPointId)
+	targetCommit := gitlet.GetCommitById(targetCommitId)
+
+	allFiles := make(map[string]bool)
+	for f := range splitCommit.BlobIds {
+		allFiles[f] = true
+	}
+	for f := range headCommit.BlobIds {
+		allFiles[f] = true
+	}
+	for f := range targetCommit.BlobIds {
+		allFiles[f] = true
+	}
+
+	newBlobIds := make(map[string]string)
+	hasConflict := false
+
+	for file := range allFiles {
+		splitBlobId, inSplit := splitCommit.BlobIds[file]
+		currentBlobId, inCurrent := headCommit.BlobIds[file]
+		targetBlobId, inTarget := targetCommit.BlobIds[file]
+
+		switch {
+		case inSplit && inCurrent && inTarget:
+			if splitBlobId == currentBlobId && splitBlobId == targetBlobId {
+				newBlobIds[file] = currentBlobId
+			} else if splitBlobId == currentBlobId {
+				newBlobIds[file] = targetBlobId
+			} else if splitBlobId == targetBlobId {
+				newBlobIds[file] = currentBlobId
+			} else if currentBlobId == targetBlobId {
+				newBlobIds[file] = currentBlobId
+			} else {
+				hasConflict = true
+				cb := writeConflict(file, currentBlobId, targetBlobId)
+				newBlobIds[file] = cb.HashId
+			}
+
+		case !inSplit && inCurrent && inTarget:
+			if currentBlobId == targetBlobId {
+				newBlobIds[file] = currentBlobId
+			} else {
+				hasConflict = true
+				cb := writeConflict(file, currentBlobId, targetBlobId)
+				newBlobIds[file] = cb.HashId
+			}
+
+		case !inSplit && inCurrent && !inTarget:
+			newBlobIds[file] = currentBlobId
+
+		case !inSplit && !inCurrent && inTarget:
+			newBlobIds[file] = targetBlobId
+
+		case inSplit && !inCurrent && inTarget:
+			if splitBlobId == targetBlobId {
+				// Deleted in current, not modified in target → stay deleted
+			} else {
+				hasConflict = true
+				cb := writeConflict(file, "", targetBlobId)
+				newBlobIds[file] = cb.HashId
+			}
+
+		case inSplit && inCurrent && !inTarget:
+			if splitBlobId == currentBlobId {
+				// Deleted in target, not modified in current → delete
+			} else {
+				hasConflict = true
+				cb := writeConflict(file, currentBlobId, "")
+				newBlobIds[file] = cb.HashId
+			}
+
+		// inSplit && !inCurrent && !inTarget → both deleted, nothing to do
 		}
 	}
 
-	return miniKey
+	// Remove old working tree files
+	for _, blobId := range headCommit.BlobIds {
+		blob := gitlet.GetBlobById(blobId)
+		if blob != nil && utils.FileExists(blob.FilePath) {
+			utils.RemoveFileByPath(blob.FilePath)
+		}
+	}
+
+	// Write merged files
+	newIdx := gitlet.NewIndex()
+	for file, blobId := range newBlobIds {
+		blob := gitlet.GetBlobById(blobId)
+		if blob != nil {
+			utils.WriteFileBytes(blob.FilePath, blob.Contents)
+			newIdx.Update(file, blobId)
+		}
+	}
+	newIdx.Save()
+
+	// Create merge commit
+	message := fmt.Sprintf("Merged %s into %s.", targetBranchName, currentBranch)
+	commit := gitlet.NewMergeCommit(message, []string{currentCommitId, targetCommitId})
+	commit.BlobIds = newBlobIds
+	commit.Persist()
+	gitlet.MoveBranchPoint(commit.HashId)
+
+	if hasConflict {
+		fmt.Println("merge: Encountered a merge conflict.")
+	} else {
+		fmt.Println("merge: Merge complete.")
+	}
 }
 
-func getMapHelper(m map[string]int, deep int, commitId string) {
-	commit := gitlet.GetCommitById(commitId)
-	if commit.Parent == nil {
-		return
+func writeConflict(filePath, currentBlobId, targetBlobId string) *gitlet.Blob {
+	var currentContent, targetContent string
+	if currentBlobId != "" {
+		blob := gitlet.GetBlobById(currentBlobId)
+		if blob != nil {
+			currentContent = string(blob.Contents)
+		}
 	}
-	m[commitId] = deep
-	for _, p := range commit.Parent {
-		getMapHelper(m, deep + 1, p)
+	if targetBlobId != "" {
+		blob := gitlet.GetBlobById(targetBlobId)
+		if blob != nil {
+			targetContent = string(blob.Contents)
+		}
 	}
+	if currentContent != "" && !strings.HasSuffix(currentContent, "\n") {
+		currentContent += "\n"
+	}
+	if targetContent != "" && !strings.HasSuffix(targetContent, "\n") {
+		targetContent += "\n"
+	}
+	content := "<<<<<<< HEAD\n" + currentContent + "=======\n" + targetContent + ">>>>>>>\n"
+	blob := gitlet.NewBlob(filePath, []byte(content))
+	blob.Persist()
+	return blob
+}
+
+// getSplitPoint finds the latest common ancestor of two branches via BFS.
+func getSplitPoint(branch1, branch2 string) string {
+	commitId1 := string(utils.ReadFile(config.BRANCHES + "/" + branch1))
+	commitId2 := string(utils.ReadFile(config.BRANCHES + "/" + branch2))
+
+	// Collect all ancestors of branch1
+	ancestors := make(map[string]bool)
+	queue := []string{commitId1}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if ancestors[cur] {
+			continue
+		}
+		ancestors[cur] = true
+		c := gitlet.GetCommitById(cur)
+		if c.Parent != nil {
+			queue = append(queue, c.Parent...)
+		}
+	}
+
+	// BFS from branch2; the first hit in ancestors is the split point
+	queue = []string{commitId2}
+	visited := make(map[string]bool)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if ancestors[cur] {
+			return cur
+		}
+		c := gitlet.GetCommitById(cur)
+		if c.Parent != nil {
+			queue = append(queue, c.Parent...)
+		}
+	}
+	return ""
+}
+
+func Diff(args ...string) {
+	idx := gitlet.LoadIndex()
+
+	if len(args) > 0 && args[0] == "--staged" {
+		headCommit := gitlet.GetCommitById(gitlet.GetHEAD())
+
+		// Files in index that differ from HEAD (staged additions / modifications)
+		paths := sortedKeys(idx.Entries)
+		for _, path := range paths {
+			blobId := idx.Entries[path]
+			headBlobId, inHead := headCommit.BlobIds[path]
+			if !inHead {
+				blob := gitlet.GetBlobById(blobId)
+				if blob != nil {
+					diffs := utils.DiffText("", string(blob.Contents))
+					fmt.Print(utils.FormatDiff(path, diffs))
+				}
+			} else if headBlobId != blobId {
+				headBlob := gitlet.GetBlobById(headBlobId)
+				newBlob := gitlet.GetBlobById(blobId)
+				if headBlob != nil && newBlob != nil {
+					diffs := utils.DiffText(string(headBlob.Contents), string(newBlob.Contents))
+					fmt.Print(utils.FormatDiff(path, diffs))
+				}
+			}
+		}
+		// Files removed from index (staged deletions)
+		removedPaths := sortedKeys(headCommit.BlobIds)
+		for _, path := range removedPaths {
+			if !idx.Has(path) {
+				headBlob := gitlet.GetBlobById(headCommit.BlobIds[path])
+				if headBlob != nil {
+					diffs := utils.DiffText(string(headBlob.Contents), "")
+					fmt.Print(utils.FormatDiff(path, diffs))
+				}
+			}
+		}
+	} else {
+		// Working tree vs index (unstaged changes)
+		paths := sortedKeys(idx.Entries)
+		for _, path := range paths {
+			blobId := idx.Entries[path]
+			if utils.FileExists(path) {
+				content := utils.ReadFile(path)
+				if utils.GenerateID(content) != blobId {
+					indexBlob := gitlet.GetBlobById(blobId)
+					if indexBlob != nil {
+						diffs := utils.DiffText(string(indexBlob.Contents), string(content))
+						fmt.Print(utils.FormatDiff(path, diffs))
+					}
+				}
+			} else {
+				indexBlob := gitlet.GetBlobById(blobId)
+				if indexBlob != nil {
+					diffs := utils.DiffText(string(indexBlob.Contents), "")
+					fmt.Print(utils.FormatDiff(path, diffs))
+				}
+			}
+		}
+	}
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func mapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
 }

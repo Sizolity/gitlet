@@ -90,6 +90,8 @@ func main() {
 		} else {
 			fmt.Println("merge: Get wrong argument num.")
 		}
+	case "diff":
+		instruction.Diff(args[1:]...)
 	default:
 		fmt.Println("Please input a valid instruction.")
 		return

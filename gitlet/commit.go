@@ -8,33 +8,39 @@ import (
 	"time"
 )
 
-
 type Commit struct {
-	Message string	`json:"message"`
-	Parent []string	`json:"parents"`
-	CurrDate time.Time	`json:"currDate"`
-	HashId string	`json:"hashId"`
-	BlobIds map[string]string	`json:"blobIds"`
+	Message  string            `json:"message"`
+	Parent   []string          `json:"parents"`
+	CurrDate time.Time         `json:"currDate"`
+	HashId   string            `json:"hashId"`
+	BlobIds  map[string]string `json:"blobIds"`
 }
 
 func NewCommit(message string) *Commit {
+	now := time.Now()
+	parents := []string{GetHEAD()}
+	raw := message + now.String()
+	for _, p := range parents {
+		raw += p
+	}
 	return &Commit{
-		Message: message,
-		Parent: []string{GetHEAD()},
-		CurrDate: time.Now(),
-		HashId: utils.GenerateID(),
-		BlobIds: nil,
+		Message:  message,
+		Parent:   parents,
+		CurrDate: now,
+		HashId:   utils.GenerateID([]byte(raw)),
+		BlobIds:  nil,
 	}
 }
 
-/* Init commit */
 func NewInitCommit() *Commit {
+	now := time.Now()
+	msg := "Init Commit"
 	return &Commit{
-		Message: "Init Commit",
-		Parent: nil,
-		CurrDate: time.Now(),
-		HashId: utils.GenerateID(),
-		BlobIds: make(map[string]string),
+		Message:  msg,
+		Parent:   nil,
+		CurrDate: now,
+		HashId:   utils.GenerateID([]byte(msg + now.String())),
+		BlobIds:  make(map[string]string),
 	}
 }
 
@@ -43,11 +49,9 @@ func (c *Commit) Persist() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	utils.WriteFileBytes(config.COMMIT + "/" + c.HashId, data)
+	utils.WriteFileBytes(config.COMMIT+"/"+c.HashId, data)
 }
 
-
-/* Get commit entity by commitId */
 func GetCommitById(id string) *Commit {
 	commit := &Commit{}
 	filepath := utils.FindFile(config.COMMIT, id)
@@ -62,7 +66,21 @@ func GetCommitById(id string) *Commit {
 	return commit
 }
 
-/* Get all commits */
+func NewMergeCommit(message string, parents []string) *Commit {
+	now := time.Now()
+	raw := message + now.String()
+	for _, p := range parents {
+		raw += p
+	}
+	return &Commit{
+		Message:  message,
+		Parent:   parents,
+		CurrDate: now,
+		HashId:   utils.GenerateID([]byte(raw)),
+		BlobIds:  nil,
+	}
+}
+
 func GetAllCommits() []*Commit {
 	commits := make([]*Commit, 0)
 	dirs := utils.ReadDir(config.COMMIT)
@@ -75,6 +93,6 @@ func GetAllCommits() []*Commit {
 			log.Fatal(err)
 		}
 		commits = append(commits, commit)
-	} 
+	}
 	return commits
 }
