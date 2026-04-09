@@ -1,0 +1,5 @@
+?   	gitlet	[no test files]
+?   	gitlet/config	[no test files]
+ok  	gitlet/internal/command	0.003s
+ok  	gitlet/internal/object	0.002s
+ok  	gitlet/pkg/utils	0.001s

@@ -3,7 +3,7 @@ package gitlet
 import (
 	"encoding/json"
 	"gitlet/config"
-	"gitlet/utils"
+	"gitlet/pkg/utils"
 	"log"
 	"path/filepath"
 )

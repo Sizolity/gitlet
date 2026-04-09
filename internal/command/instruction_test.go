@@ -1,4 +1,4 @@
-package instruction
+package command
 
 import (
 	"fmt"
@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlet/gitlet"
-	"gitlet/utils"
+	gitlet "gitlet/internal/object"
+	"gitlet/pkg/utils"
 )
 
 func debugLog(t *testing.T, runID, hypothesisID, location, message string, data string) {

@@ -2,7 +2,7 @@ package gitlet
 
 import (
 	"gitlet/config"
-	"gitlet/utils"
+	"gitlet/pkg/utils"
 	"path/filepath"
 	"strings"
 )

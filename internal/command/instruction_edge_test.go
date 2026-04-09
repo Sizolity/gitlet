@@ -1,4 +1,4 @@
-package instruction
+package command
 
 import (
 	"io"
@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"gitlet/gitlet"
-	"gitlet/utils"
+	gitlet "gitlet/internal/object"
+	"gitlet/pkg/utils"
 )
 
 func captureOutput(t *testing.T, fn func()) string {

@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"gitlet/config"
-	"gitlet/utils"
+	"gitlet/pkg/utils"
 )
 
 func setupGitletRepo(t *testing.T) *Commit {
