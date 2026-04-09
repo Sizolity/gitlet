@@ -15,6 +15,9 @@ func WriteFile(filePath string, data string) {
 }
 
 func WriteFileBytes(filename string, bytes []byte) {
+	if dir := filepath.Dir(filename); dir != "." {
+		os.MkdirAll(dir, 0755)
+	}
 	err := os.WriteFile(filename, bytes, 0644)
 	if err != nil {
 		log.Fatal(err)
@@ -33,6 +36,13 @@ func RemoveFileByPath(filePath string) {
 	err := os.Remove(filePath)
 	if err != nil {
 		log.Fatal(err)
+	}
+	for dir := filepath.Dir(filePath); dir != "." && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) > 0 {
+			break
+		}
+		os.Remove(dir)
 	}
 }
 

@@ -4,35 +4,46 @@ import (
 	"gitlet/config"
 	"gitlet/utils"
 	"path/filepath"
+	"strings"
 )
 
-/* Get commitId which HEAD point to. */
+func IsDetachedHEAD() bool {
+	data := string(utils.ReadFile(config.HEAD))
+	return !strings.HasPrefix(data, ".gitlet/")
+}
+
 func GetHEAD() string {
-	data := utils.ReadFile(config.HEAD)
-	refs_branch := string(data)
-	blobId := utils.ReadFile(refs_branch)
-	return string(blobId)
+	data := string(utils.ReadFile(config.HEAD))
+	if strings.HasPrefix(data, ".gitlet/") {
+		return string(utils.ReadFile(data))
+	}
+	return data
 }
 
-/* Get HEAD Branch */
 func GetHEADBranch() string {
-	data := utils.ReadFile(config.HEAD)
-	refs_branch := string(data)
-	return filepath.Base(refs_branch)
+	data := string(utils.ReadFile(config.HEAD))
+	if strings.HasPrefix(data, ".gitlet/") {
+		return filepath.Base(data)
+	}
+	return ""
 }
 
-/* Change HEAD point to */
 func MoveHEAD(branchName string) {
 	branchPath := config.BRANCHES + "/" + branchName
 	utils.WriteFile(config.HEAD, branchPath)
 }
 
-/* Move Branch point to. */
+func DetachHEAD(commitId string) {
+	utils.WriteFile(config.HEAD, commitId)
+}
+
 func MoveBranchPoint(commitId string) {
-	data := utils.ReadFile(config.HEAD)
-	refs_branch := string(data)
-	// blobId, err := os.ReadFile(refs_branch)
-	utils.WriteFile(refs_branch, commitId)
+	data := string(utils.ReadFile(config.HEAD))
+	if strings.HasPrefix(data, ".gitlet/") {
+		utils.WriteFile(data, commitId)
+	} else {
+		utils.WriteFile(config.HEAD, commitId)
+	}
 }
 
 func BranchExist(branchName string) bool {

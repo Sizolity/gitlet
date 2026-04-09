@@ -6,6 +6,7 @@ import (
 	"gitlet/gitlet"
 	"gitlet/utils"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -160,7 +161,12 @@ func Status() {
 	fmt.Printf("=== Branches ===\n")
 	HEADBranch := gitlet.GetHEADBranch()
 	branches := utils.ReadDir(config.BRANCHES)
-	fmt.Printf("*%s\n", HEADBranch)
+	if HEADBranch == "" {
+		commitId := gitlet.GetHEAD()
+		fmt.Printf("*HEAD detached at %s\n", commitId[:7])
+	} else {
+		fmt.Printf("*%s\n", HEADBranch)
+	}
 	for _, branch := range branches {
 		if name := branch.Name(); name != HEADBranch {
 			fmt.Printf(" %s\n", name)
@@ -232,19 +238,26 @@ func Status() {
 func getWorkTreeFiles() []string {
 	var files []string
 	patterns := gitlet.LoadIgnorePatterns()
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		return files
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || entry.Name() == ".gitlet" {
-			continue
+	filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
-		if gitlet.IsIgnored(entry.Name(), patterns) {
-			continue
+		if d.IsDir() {
+			if d.Name() == ".gitlet" {
+				return filepath.SkipDir
+			}
+			if gitlet.IsIgnored(d.Name(), patterns) {
+				return filepath.SkipDir
+			}
+			return nil
 		}
-		files = append(files, entry.Name())
-	}
+		path = filepath.ToSlash(path)
+		if gitlet.IsIgnored(path, patterns) {
+			return nil
+		}
+		files = append(files, path)
+		return nil
+	})
 	return files
 }
 
@@ -263,7 +276,11 @@ func Checkout(args ...string) {
 			fmt.Println("checkout: Wrong argument.")
 		}
 	} else if NumArgs == 1 {
-		switchBranch(args[0])
+		if gitlet.BranchExist(args[0]) {
+			switchBranch(args[0])
+		} else {
+			detachCheckout(args[0])
+		}
 	} else {
 		fmt.Println("checkout: Get wrong argument num.")
 	}
@@ -322,6 +339,38 @@ func switchBranch(branchName string) {
 	fmt.Printf("checkout: switch to %s.\n", branchName)
 }
 
+func detachCheckout(commitId string) {
+	targetCommit := gitlet.GetCommitById(commitId)
+	if targetCommit == nil {
+		fmt.Println("checkout: No such branch or commit.")
+		return
+	}
+
+	currentCommit := gitlet.GetCommitById(gitlet.GetHEAD())
+	for _, blobId := range currentCommit.BlobIds {
+		blob := gitlet.GetBlobById(blobId)
+		if blob != nil {
+			utils.RemoveFileByPath(blob.FilePath)
+		}
+	}
+
+	gitlet.DetachHEAD(commitId)
+	for _, blobId := range targetCommit.BlobIds {
+		blob := gitlet.GetBlobById(blobId)
+		if blob != nil {
+			utils.WriteFileBytes(blob.FilePath, blob.Contents)
+		}
+	}
+
+	idx := gitlet.NewIndex()
+	for k, v := range targetCommit.BlobIds {
+		idx.Entries[k] = v
+	}
+	idx.Save()
+
+	fmt.Printf("checkout: HEAD detached at %s.\n", commitId[:7])
+}
+
 func Branch(newBranchName string) {
 	commitId := gitlet.GetHEAD()
 	utils.WriteFile(config.BRANCHES+"/"+newBranchName, commitId)
@@ -375,6 +424,10 @@ func Reset(cId string) {
 func Merge(targetBranchName string) {
 	currentBranch := gitlet.GetHEADBranch()
 
+	if currentBranch == "" {
+		fmt.Println("merge: Cannot merge in detached HEAD state.")
+		return
+	}
 	if !gitlet.BranchExist(targetBranchName) {
 		fmt.Println("merge: Target branch does not exist.")
 		return
