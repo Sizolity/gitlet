@@ -10,6 +10,7 @@ gitlet/
 │   └── config.go              # .gitlet 内部路径常量
 ├── gitlet/
 │   ├── blob.go                # Blob 对象：文件内容的持久化单元
+│   ├── tree.go                # Tree 对象：目录结构的递归表示
 │   ├── commit.go              # Commit 对象：提交的持久化与查询
 │   ├── stage.go               # Index（暂存区）：下一次提交的完整快照
 │   ├── refs.go                # HEAD 与分支引用的读写（含 detached HEAD）
@@ -32,7 +33,7 @@ gitlet/
 |---|------|
 | `main` | 解析 `os.Args`，根据子命令分发到 `instruction` 包 |
 | `config` | 定义 `.gitlet` 目录结构的路径常量 |
-| `gitlet` | 核心数据模型：`Blob`、`Commit`、`Index`、引用操作、`.gitletignore` 匹配 |
+| `gitlet` | 核心数据模型：`Blob`、`Tree`、`Commit`、`Index`、引用操作、`.gitletignore` 匹配 |
 | `instruction` | 命令实现层，协调 `gitlet` 包完成每条命令的业务逻辑 |
 | `utils` | 与 Git 语义无关的底层工具：文件 I/O、哈希、行级 diff、终端颜色 |
 
@@ -43,7 +44,7 @@ gitlet/
 ```go
 type Blob struct {
     Filename string   // 文件名（不含路径）
-    FilePath string   // 相对路径（作为 Index 和 Commit 中的 key）
+    FilePath string   // 相对路径（作为 Index 中的 key）
     Contents []byte   // 文件完整内容
     HashId   string   // SHA-1(Contents)，内容寻址
 }
@@ -53,23 +54,55 @@ type Blob struct {
 - 序列化格式：JSON
 - **内容寻址**：相同内容的文件始终产生相同的 HashId，天然去重
 
-### 2.2 Commit（提交对象）
+### 2.2 Tree（目录对象）
+
+```go
+type TreeEntry struct {
+    Name   string   // 单层名称（如 "main.go" 或 "src"）
+    Type   string   // "blob" 或 "tree"
+    HashId string   // 指向 Blob 或子 Tree 的 HashId
+}
+
+type Tree struct {
+    Entries []TreeEntry   // 按 Name 排序的条目列表
+    HashId  string        // SHA-1(JSON(排序后的 Entries))
+}
+```
+
+- 存储位置：`.gitlet/objects/trees/<HashId>`
+- 序列化格式：JSON
+- 每个 Tree 表示一个目录层级，通过 `type: "tree"` 的条目递归引用子目录
+- **内容寻址**：相同目录结构产生相同 HashId，天然去重
+
+示例：对于文件 `foo.txt` 和 `src/main.go`，会生成：
+
+```
+Root Tree:
+  {Name: "foo.txt", Type: "blob", HashId: "aaa..."}
+  {Name: "src",     Type: "tree", HashId: "bbb..."}
+
+src/ Tree (HashId: "bbb..."):
+  {Name: "main.go", Type: "blob", HashId: "ccc..."}
+```
+
+### 2.3 Commit（提交对象）
 
 ```go
 type Commit struct {
-    Message  string
-    Parent   []string            // 父提交 HashId 列表（合并提交有两个父提交）
+    Message  string      // 提交信息
+    Parent   []string    // 父提交 HashId 列表（合并提交有两个父提交）
     CurrDate time.Time
-    HashId   string              // SHA-1(Message + Time + Parents)
-    BlobIds  map[string]string   // filepath -> blob HashId
+    HashId   string      // SHA-1(Message + Time + Parents)
+    TreeId   string      // 根 Tree 的 HashId
 }
 ```
 
 - 存储位置：`.gitlet/objects/commits/<HashId>`
 - 序列化格式：JSON
-- `BlobIds` 是提交时暂存区的完整快照
+- `TreeId` 指向根 Tree 对象，递归表示提交时的完整目录快照
+- 加载时自动通过 `FlattenTree(TreeId)` 展平为 `BlobIds map[string]string` 供内部使用
 
-### 2.3 Index（暂存区）
+### 2.4 Index（暂存区）
 
 ```go
 type Index struct {
@@ -79,7 +112,8 @@ type Index struct {
 
 - 存储位置：`.gitlet/index`（单个 JSON 文件）
 - **核心语义**：Index 始终表示"下一次提交的完整文件快照"
-- `init` / `commit` / `checkout` / `reset` 之后，Index 与 HEAD 提交的 `BlobIds` 一致
+- Index 使用扁平的 `filepath -> blobId` 格式，Tree 仅在 commit 时构建
+- `init` / `commit` / `checkout` / `reset` 之后，Index 与 HEAD 提交展平后的内容一致
 - `add` 更新对应条目，`rm` 删除对应条目
 
 ## 3. 存储结构
@@ -94,6 +128,9 @@ type Index struct {
 │   ├── blobs/                 # Blob 对象，文件名 = SHA-1(内容)
 │   │   ├── a1b2c3d4...
 │   │   └── e5f6a7b8...
+│   ├── trees/                 # Tree 对象，文件名 = SHA-1(条目列表)
+│   │   ├── f1e2d3c4...
+│   │   └── b5a6c7d8...
 │   └── commits/               # Commit 对象，文件名 = HashId
 │       ├── 1a2b3c4d...
 │       └── 5e6f7a8b...
@@ -107,15 +144,10 @@ type Index struct {
 ### 引用解析流程
 
 ```
-HEAD 文件内容: ".gitlet/refs/heads/master"  （正常模式）
-    ↓ 读取该路径
-refs/heads/master 文件内容: "a1b2c3d4e5..."  (commitId)
-    ↓ 在 objects/commits/ 中查找
-Commit 对象: {BlobIds: {"foo.txt": "abc123..."}, ...}
-
-HEAD 文件内容: "a1b2c3d4e5..."  （detached HEAD 模式）
-    ↓ 直接作为 commitId 使用
-Commit 对象: {BlobIds: {...}, ...}
+HEAD -> commitId -> Commit 对象
+  Commit.TreeId -> Root Tree 对象
+    Tree.Entries -> Blob 对象（文件）
+                 -> 子 Tree 对象（子目录）-> ...递归
 ```
 
 ## 4. 核心架构
@@ -134,6 +166,8 @@ Gitlet 遵循 Git 的三区设计：
                               └──────────────────────────────────┘
 ```
 
+提交时，Index 的扁平 map 通过 `BuildTree` 构建为 Tree 层级结构；加载时，通过 `FlattenTree` 展平回 map。
+
 三区之间的比较关系决定了 `status` 和 `diff` 的输出：
 
 | 比较 | 结果 |
@@ -146,11 +180,12 @@ Gitlet 遵循 Git 的三区设计：
 #### `init`
 
 ```
-1. 创建 .gitlet 目录结构
-2. 创建初始 Commit（空 BlobIds）
-3. 写入 refs/heads/master = commitId
-4. 写入 HEAD = ".gitlet/refs/heads/master"
-5. 创建空 Index
+1. 创建 .gitlet 目录结构（含 objects/trees/）
+2. 创建空 Tree 对象并持久化
+3. 创建初始 Commit（TreeId 指向空 Tree）
+4. 写入 refs/heads/master = commitId
+5. 写入 HEAD = ".gitlet/refs/heads/master"
+6. 创建空 Index
 ```
 
 #### `add <file>`
@@ -172,12 +207,13 @@ Gitlet 遵循 Git 的三区设计：
 
 ```
 1. 加载 Index 和 HEAD Commit
-2. 比较 Index.Entries 与 HEAD.BlobIds
+2. 比较 Index.Entries 与 HEAD 展平后的 BlobIds
      → 完全相同则拒绝提交
-3. 创建新 Commit，BlobIds = Index.Entries 的副本
-4. 持久化 Commit 到 objects/commits/
-5. 更新当前分支指针（或 detached HEAD）→ 新 commitId
-   （Index 保持不变，此时 Index == 新 HEAD）
+3. 调用 BuildTree(Index.Entries) 构建 Tree 层级 → treeId
+4. 创建新 Commit，TreeId = treeId
+5. 持久化 Commit 到 objects/commits/
+6. 更新当前分支指针（或 detached HEAD）→ 新 commitId
+   （Index 保持不变，此时 Index == 新 HEAD 展平后的内容）
 ```
 
 #### `rm <file>`
@@ -254,7 +290,8 @@ checkout <commitId>        Detached HEAD（参数非分支名时）:
      · 两侧相同修改 → 采用任一
      · 两侧不同修改 → 写入冲突标记（<<<<<<< / ======= / >>>>>>>）
    - 清理旧工作区文件，写入合并后文件
-   - 创建 merge commit（两个父提交）
+   - 调用 BuildTree 从合并结果构建 Tree
+   - 创建 merge commit（两个父提交，TreeId 指向合并后的 Tree）
 ```
 
 #### `diff`
@@ -275,7 +312,7 @@ diff --staged  暂存区 vs HEAD:
 
 ## 5. 内容寻址与 SHA-1
 
-### Blob 的 ID 生成
+### ID 生成
 
 ```go
 func GenerateID(data []byte) string {
@@ -285,12 +322,11 @@ func GenerateID(data []byte) string {
 }
 ```
 
-对于 Blob，`data` 是文件的原始字节内容。这意味着：
-- 相同内容的文件永远产生相同的 HashId
-- 对象存储天然去重：多次 add 相同内容不会产生重复对象
-- 可以通过比较 HashId 快速判断内容是否相同
-
-对于 Commit，`data` 是 `message + time + parentIds` 的拼接，确保每个提交有唯一标识。
+| 对象 | 哈希输入 | 含义 |
+|------|----------|------|
+| Blob | 文件原始字节 | 相同内容 = 相同 HashId，天然去重 |
+| Tree | 排序后的 Entries JSON | 相同目录结构 = 相同 HashId |
+| Commit | message + time + parentIds | 确保每个提交有唯一标识 |
 
 ## 6. 包依赖关系
 
@@ -312,15 +348,15 @@ main
 | 特性 | Git | Gitlet |
 |------|-----|--------|
 | 对象存储 | 二进制 packfile + loose objects | JSON 文件 |
-| 对象类型 | blob, tree, commit, tag | blob, commit |
-| 暂存区 | 二进制 index 文件 | JSON index 文件 |
+| 对象类型 | blob, tree, commit, tag | blob, tree, commit |
+| 暂存区 | 二进制 index 文件 | JSON index 文件（扁平 map） |
 | 内容寻址 | SHA-1（带类型前缀 `blob <size>\0`） | SHA-1（纯内容） |
 | 分支 | refs/heads/ 下的文本文件 | 相同 |
 | HEAD | 支持 detached HEAD | 支持 detached HEAD |
 | Merge | 三路合并 + 冲突处理 | 三路合并 + 冲突标记 |
 | Diff | 多种 diff 算法（Myers、patience 等） | 基于 LCS 的行级 diff |
 | 忽略文件 | `.gitignore`（支持嵌套、否定模式） | `.gitletignore`（顶层 glob 模式） |
-| 目录跟踪 | tree 对象递归表示 | 递归遍历子目录（无 tree 对象） |
+| 目录跟踪 | tree 对象递归表示 | tree 对象递归表示 |
 | 网络协议 | push/pull/fetch | 未实现 |
 
 ## 8. 已知限制

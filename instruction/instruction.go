@@ -17,6 +17,7 @@ func Init_gitlet() {
 		os.Mkdir(".gitlet", 0755)
 		os.MkdirAll(config.COMMIT, 0755)
 		os.MkdirAll(config.BLOB, 0755)
+		os.MkdirAll(config.TREE, 0755)
 		os.MkdirAll(config.BRANCHES, 0755)
 		os.MkdirAll(config.REMOTES, 0755)
 		os.Create(config.HEAD)
@@ -81,11 +82,7 @@ func Commit(messages ...string) {
 	}
 
 	commit := gitlet.NewCommit(message)
-	blobIds := make(map[string]string)
-	for k, v := range idx.Entries {
-		blobIds[k] = v
-	}
-	commit.BlobIds = blobIds
+	commit.TreeId = gitlet.BuildTree(idx.Entries)
 	commit.Persist()
 	gitlet.MoveBranchPoint(commit.HashId)
 
@@ -576,7 +573,7 @@ func Merge(targetBranchName string) {
 	// Create merge commit
 	message := fmt.Sprintf("Merged %s into %s.", targetBranchName, currentBranch)
 	commit := gitlet.NewMergeCommit(message, []string{currentCommitId, targetCommitId})
-	commit.BlobIds = newBlobIds
+	commit.TreeId = gitlet.BuildTree(newBlobIds)
 	commit.Persist()
 	gitlet.MoveBranchPoint(commit.HashId)
 

@@ -13,7 +13,8 @@ type Commit struct {
 	Parent   []string          `json:"parents"`
 	CurrDate time.Time         `json:"currDate"`
 	HashId   string            `json:"hashId"`
-	BlobIds  map[string]string `json:"blobIds"`
+	TreeId   string            `json:"treeId"`
+	BlobIds  map[string]string `json:"-"`
 }
 
 func NewCommit(message string) *Commit {
@@ -28,18 +29,20 @@ func NewCommit(message string) *Commit {
 		Parent:   parents,
 		CurrDate: now,
 		HashId:   utils.GenerateID([]byte(raw)),
-		BlobIds:  nil,
 	}
 }
 
 func NewInitCommit() *Commit {
 	now := time.Now()
 	msg := "Init Commit"
+	emptyTree := NewTree(nil)
+	emptyTree.Persist()
 	return &Commit{
 		Message:  msg,
 		Parent:   nil,
 		CurrDate: now,
 		HashId:   utils.GenerateID([]byte(msg + now.String())),
+		TreeId:   emptyTree.HashId,
 		BlobIds:  make(map[string]string),
 	}
 }
@@ -63,6 +66,7 @@ func GetCommitById(id string) *Commit {
 	if err != nil {
 		log.Fatal(err)
 	}
+	commit.BlobIds = FlattenTree(commit.TreeId)
 	return commit
 }
 
@@ -77,7 +81,6 @@ func NewMergeCommit(message string, parents []string) *Commit {
 		Parent:   parents,
 		CurrDate: now,
 		HashId:   utils.GenerateID([]byte(raw)),
-		BlobIds:  nil,
 	}
 }
 
@@ -92,6 +95,7 @@ func GetAllCommits() []*Commit {
 		if err != nil {
 			log.Fatal(err)
 		}
+		commit.BlobIds = FlattenTree(commit.TreeId)
 		commits = append(commits, commit)
 	}
 	return commits
